@@ -2607,7 +2607,7 @@ int SetSocketNameResolutionPolicy(SOCKET sd, HANDLE resolution_handle)
 
     if (resolution_handle == NULL)
     {
-        return ERROR_SUCCESS;
+        return NO_ERROR;
     }
 
     input.TransportSettingId.Guid = ASSOCIATE_NAMERES_CONTEXT;
