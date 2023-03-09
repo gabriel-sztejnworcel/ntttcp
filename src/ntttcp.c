@@ -276,7 +276,7 @@ typedef BOOL (CALLBACK *LPFN_QOSREMOVESOCKETFROMFLOW) (
 #define ERROR_SOCKET                        13
 #define ERROR_SETSOCKOPT                    14
 #define ERROR_MEMCPY                        16
-#define ERROR_GETADDRINFO                   17
+#define ERROR_GETADDRINFOEX                 17
 #define ERROR_WSAADDRTOSTRING               18
 #define ERROR_SETTING_TRANSMIT_PACKETS      19
 #define ERROR_CONNECT_BIND                  20
@@ -301,8 +301,8 @@ typedef BOOL (CALLBACK *LPFN_QOSREMOVESOCKETFROMFLOW) (
 #define ERROR_CLOSING_TIMER_QUEUE_TIMER     40
 #define ERROR_FORMING_PAYLOAD               41
 
-LPFN_GETADDRINFO GetAddrinfo;
-LPFN_FREEADDRINFO FreeAddrinfo;
+LPFN_GETADDRINFOEXA GetAddrinfoEx;
+LPFN_FREEADDRINFOEXA FreeAddrinfoEx;
 FARPROC lpGetTcpStatsEx;
 FARPROC lpGetTcpStatsEx2;
 FARPROC lpGetUdpStatsEx;
@@ -1150,7 +1150,7 @@ PrintLocalError(
         case ERROR_SOCKET: PrintError(function, "error creating socket"); break;
         case ERROR_SETSOCKOPT: PrintError(function, "error setting socket option"); break;
         case ERROR_MEMCPY: PrintError(function, "error copying memmory"); break;
-        case ERROR_GETADDRINFO: PrintError(function, "error in getaddrinfo"); break;
+        case ERROR_GETADDRINFOEX: PrintError(function, "error in GetAddrInfoEx"); break;
         case ERROR_WSAADDRTOSTRING: PrintError(function, "error in WSAAddrToString"); break;
         case ERROR_SETTING_TRANSMIT_PACKETS: PrintError(function, "error while setting TransmitPackets function pointer"); break;
         case ERROR_CONNECT_BIND: PrintError(function, "error in connect/bind function"); break;
@@ -1307,8 +1307,8 @@ InitDLLs(
         }
     }
 
-    GetAddrinfo = (LPFN_GETADDRINFO)GetProcAddress(WSockModuleHandle, "getaddrinfo");
-    if (NULL == GetAddrinfo) {
+    GetAddrinfoEx = (LPFN_GETADDRINFOEXA)GetProcAddress(WSockModuleHandle, "GetAddrInfoExA");
+    if (NULL == GetAddrinfoEx) {
         goto error_get_proc_address;
     }
 
@@ -1336,8 +1336,8 @@ InitDLLs(
         }
     }
 
-    FreeAddrinfo = (LPFN_FREEADDRINFO)GetProcAddress(WSockModuleHandle, "freeaddrinfo");
-    if (NULL == FreeAddrinfo) {
+    FreeAddrinfoEx = (LPFN_FREEADDRINFOEXA)GetProcAddress(WSockModuleHandle, "FreeAddrInfoExW");
+    if (NULL == FreeAddrinfoEx) {
         goto error_get_proc_address;
     }
 
@@ -1418,8 +1418,8 @@ error_get_proc_address:
 
 error_load_library:
 
-    GetAddrinfo     = NULL;
-    FreeAddrinfo    = NULL;
+    GetAddrinfoEx   = NULL;
+    FreeAddrinfoEx  = NULL;
     lpGetTcpStatsEx = NULL;
     lpGetTcpStatsEx2 = NULL;
     lpGetUdpStatsEx = NULL;
@@ -2543,7 +2543,7 @@ GetHostInfoByName(
     _In_z_ const PCHAR host_name,
     _In_ const int port,
     _In_ const BOOL udp_flag,
-    _Out_ struct addrinfo** addr_info
+    _Out_ struct addrinfoex4** addr_info
     )
 {
     int err = NO_ERROR;
@@ -2552,25 +2552,27 @@ GetHostInfoByName(
     char port_str[MAX_PORT_STR_LEN] = {0};
     char addr_buffer[MAX_IP_STR_LEN] = {0};
     int addr_buffer_len = sizeof(addr_buffer);
-    struct addrinfo hints = {0};
+    struct addrinfoex4 hints = {0};
 
     hints.ai_family = af_inet;
     hints.ai_socktype = socket_type;
+    hints.ai_version = ADDRINFOEX_VERSION_4;
+    hints.ai_flags = AI_RESOLUTION_HANDLE | AI_EXTENDED;
 
     sprintf_s(port_str, ARRAYSIZE(port_str), "%d", port);
 
     *addr_info = NULL;
     addr_buffer_len = sizeof(addr_buffer);
 
-    err = GetAddrinfo(host_name, port_str, &hints, addr_info);
+    err = GetAddrinfoEx(host_name, port_str, NS_DNS, NULL, (ADDRINFOEX*)&hints, (ADDRINFOEX**)addr_info, NULL, NULL, NULL, NULL);
     if (err != 0) {
-        VMSG("ERROR: %s: GetAddrinfo returned %d\n", __FUNCTION__, err);
-        err = ERROR_GETADDRINFO;
+        VMSG("ERROR: %s: GetAddrinfoEx returned %d\n", __FUNCTION__, err);
+        err = ERROR_GETADDRINFOEX;
         goto exit;
     }
     if (NULL == *addr_info ||
         NULL == (*addr_info)->ai_addr) {
-        err = ERROR_GETADDRINFO;
+        err = ERROR_GETADDRINFOEX;
         goto exit;
     }
 
@@ -2589,8 +2591,41 @@ exit:
     if (NO_ERROR != err) {
         PrintLocalError(__FUNCTION__, err);
         if (*addr_info) {
-            FreeAddrinfo(*addr_info);
+            FreeAddrinfoEx((ADDRINFOEX*)*addr_info);
         }
+    }
+
+    return err;
+}
+
+int SetSocketNameResolutionPolicy(SOCKET sd, HANDLE resolution_handle)
+{
+    int err = NO_ERROR;
+    DWORD status;
+    ULONG bytes_returned = 0;
+    ASSOCIATE_NAMERES_CONTEXT_INPUT input = { 0 };
+
+    if (resolution_handle == NULL)
+    {
+        return ERROR_SUCCESS;
+    }
+
+    input.TransportSettingId.Guid = ASSOCIATE_NAMERES_CONTEXT;
+    input.Handle = (UINT64)resolution_handle;
+
+    status = WSAIoctl(sd,
+        SIO_APPLY_TRANSPORT_SETTING,
+        (VOID*)&input,
+        sizeof(input),
+        NULL,
+        0,
+        &bytes_returned,
+        NULL,
+        NULL);
+
+    if (status == SOCKET_ERROR)
+    {
+        err = WSAGetLastError();
     }
 
     return err;
@@ -2619,8 +2654,8 @@ SetupNet(
     const int sock_protocol = use_hvsocket_flag ? HV_PROTOCOL_RAW : 0;
     int af_inet = use_ipv6_flag ? AF_INET6 : AF_INET;
     const int socket_type = udp_flag ? SOCK_DGRAM : SOCK_STREAM;
-    struct addrinfo* receiver_addr_info = NULL;
-    struct addrinfo* sender_addr_info = NULL;
+    struct addrinfoex4* receiver_addr_info = NULL;
+    struct addrinfoex4* sender_addr_info = NULL;
 
     if (use_hvsocket_flag) {
         af_inet = AF_HYPERV;
@@ -2766,6 +2801,12 @@ SetupNet(
 
     if (send_flag) {
 
+        err = SetSocketNameResolutionPolicy(sd, receiver_addr_info->ai_resolutionhandle);
+        if (err != NO_ERROR)
+        {
+            DMSG("WARNING: SetSocketNameResolutionPolicy returned %d.\n", err);
+        }
+
         for (int i = 0; i < SENDER_CONNECTION_RETRIES; ++i) {
 
             // Limit the number of concurrent connects to avoid network buffer overflows.
@@ -2846,11 +2887,11 @@ SetupNet(
 cleanup:
 
     if (sender_addr_info) {
-        FreeAddrinfo(sender_addr_info);
+        FreeAddrinfoEx((ADDRINFOEX*)sender_addr_info);
     }
 
     if (receiver_addr_info) {
-        FreeAddrinfo(receiver_addr_info);
+        FreeAddrinfoEx((ADDRINFOEX*)receiver_addr_info);
     }
 
 exit:
@@ -3161,7 +3202,7 @@ DoSendsReceives(
     long long latency = 0;
     PTHREAD_PERF_INFO local_perf_info = NULL;
     char* recv_buffer = NULL;
-    struct addrinfo* addr_info = NULL;
+    struct addrinfoex4* addr_info = NULL;
     LARGE_INTEGER time_perf_count_0;
     LARGE_INTEGER time_perf_count_1;
     THROTTLING_DATA throttling_data = {0};
@@ -3225,7 +3266,7 @@ DoSendsReceives(
             // Allocate address information structure to hold sender address information retuned by
             // recvfrom() call. This sender information will be an input to sendto when in
             // roundtrip mode.
-            addr_info =  (struct addrinfo*) calloc(1, sizeof(struct addrinfo));
+            addr_info =  (struct addrinfoex4*) calloc(1, sizeof(struct addrinfoex4));
 
             if (NULL == addr_info) {
                 return ERROR_MEMORY_ALLOC;
